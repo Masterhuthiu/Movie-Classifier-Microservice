@@ -4,31 +4,44 @@ from typing import List
 
 class AIService:
     def __init__(self):
-        # Lấy API Key từ biến môi trường đã cấu hình trong K8s Secret
+        # Lấy API Key từ biến môi trường
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY is not set in environment variables")
+            print("❌ LỖI: GEMINI_API_KEY chưa được cấu hình!")
+            self.enabled = False
+            return
         
-        genai.configure(api_key=api_key)
-        # Sử dụng embedding-001 để đảm bảo 768 dimensions khớp với Atlas Index của bạn
-        self.model = 'models/embedding-001'
+        try:
+            genai.configure(api_key=api_key)
+            # Dùng embedding-001 để đảm bảo 768 dimensions khớp MongoDB Index
+            self.model_name = 'models/embedding-001'
+            self.enabled = True
+            print(f"✅ AIService initialized with model: {self.model_name}")
+        except Exception as e:
+            print(f"❌ Lỗi cấu hình Gemini: {e}")
+            self.enabled = False
 
     async def get_embedding(self, text: str) -> List[float]:
+        if not self.enabled:
+            raise Exception("AI Service is not configured properly")
+
         try:
-            # Gọi API của Google để lấy vector
+            # Gọi API đồng bộ trong thread (SDK của Google hiện chưa hỗ trợ async thuần)
             result = genai.embed_content(
-                model=self.model,
+                model=self.model_name,
                 content=text,
                 task_type="retrieval_query"
             )
             
-            # Trả về mảng float (vector)
-            return result['embedding']
+            # Đảm bảo trả về đúng định dạng list float
+            if 'embedding' in result:
+                return result['embedding']
+            else:
+                raise Exception("Phản hồi từ Gemini không chứa dữ liệu embedding")
             
         except Exception as e:
-            print(f"Lỗi AI Embedding chi tiết: {str(e)}")
-            # Raise lỗi để main.py bắt được và trả về 500 cho user
+            print(f"🔥 Lỗi AI Embedding chi tiết: {str(e)}")
             raise Exception(f"Gemini API Error: {str(e)}")
 
-# Khởi tạo instance duy nhất
+# Khởi tạo instance duy nhất để dùng chung
 ai_service = AIService()
