@@ -84,21 +84,20 @@ app = FastAPI(title="Movie AI Classifier (768 Dim)", lifespan=lifespan)
 # 4. LOGIC XỬ LÝ VECTOR (GEMINI)
 # ===============================
 def get_single_embedding(text: str):
-    """Tạo vector 768 chiều từ text bằng Gemini API"""
     try:
         if not text or ai_client is None:
             return None
 
-        # Ép model 001 để luôn ra 768 chiều
+        # Sử dụng model 004 nhưng ÉP BUỘC đầu ra là 768 để khớp với MongoDB
         result = ai_client.models.embed_content(
-            model=EMBEDDING_MODEL,
+            model="models/text-embedding-004", 
             contents=text,
-            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=768  # <--- Dòng này là "chìa khóa"
+            )
         )
         vector = result.embeddings[0].values
-        
-        # Log kiểm tra số chiều để debug nếu cần
-        # print(f"DEBUG: Vector dimensions: {len(vector)}")
         return vector
     except Exception as e:
         print(f"🔥 Gemini Error: {e}")
