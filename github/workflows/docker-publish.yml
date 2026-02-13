@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - main  # Chạy khi push vào nhánh main
+      - main  # Chỉnh thành 'master' nếu nhánh của bạn tên là master
 
 jobs:
   build-and-push:
@@ -20,11 +20,11 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
+        id: docker_build
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          # Đổi tên image cho đúng với tài khoản của bạn
           tags: masterhuthiu/movie-classifier:latest
 
       - name: Image digest
