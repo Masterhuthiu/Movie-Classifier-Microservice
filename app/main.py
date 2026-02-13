@@ -1,21 +1,20 @@
-
 import os
 import socket
 import certifi
 import consul
-import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from pymongo import MongoClient
 import google.generativeai as genai
-from typing import List
-
-app = FastAPI(title="Movie AI Classifier Microservice")
 
 # ===============================
 # 1. CONFIG
 # ===============================
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority")
+MONGO_URI = os.getenv(
+    "MONGO_URI",
+    "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority",
+)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.getenv("PORT", 8083))
 
@@ -24,27 +23,29 @@ COLLECTION_NAME = "movies"
 VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
-# 🔥 FIX QUAN TRỌNG: model embedding đúng API 2025
+# 🔥 Model embedding đúng chuẩn SDK mới
 EMBEDDING_MODEL = "models/embedding-001"
 
-# MongoDB
+# ===============================
+# 2. INIT SERVICES
+# ===============================
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
 movies_col = db[COLLECTION_NAME]
 
-# Gemini config
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    print("✅ Gemini API configured successfully with embedding-001")
+    print("✅ Gemini API configured successfully")
 else:
-    print("❌ ERROR: GEMINI_API_KEY is missing!")
+    print("❌ GEMINI_API_KEY is missing")
+
 
 class MovieQuery(BaseModel):
     description: str
 
 
 # ===============================
-# 2. CONSUL REGISTER
+# 3. CONSUL REGISTER
 # ===============================
 def register_to_consul():
     try:
@@ -59,63 +60,68 @@ def register_to_consul():
             service_id=f"classifier-{PORT}",
             address=ip_addr,
             port=PORT,
-            check=consul.Check.http(f"http://{ip_addr}:{PORT}/health", interval="10s")
+            check=consul.Check.http(f"http://{ip_addr}:{PORT}/health", interval="10s"),
         )
 
-        print(f"✅ Registered to Consul: classifier-service at {ip_addr}:{PORT}")
+        print(f"✅ Registered to Consul at {ip_addr}:{PORT}")
 
     except Exception as e:
         print(f"❌ Consul registration failed: {e}")
 
 
-@app.on_event("startup")
-async def startup_event():
+# ===============================
+# 4. FASTAPI LIFESPAN (thay on_event)
+# ===============================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     register_to_consul()
+    yield
+    print("🔻 Service shutting down")
 
+
+app = FastAPI(title="Movie AI Classifier Microservice", lifespan=lifespan)
 
 # ===============================
-# 3. GEMINI EMBEDDING
+# 5. GEMINI EMBEDDING
 # ===============================
 def get_single_embedding(text: str):
-    """Generate embedding from Gemini"""
     try:
-        if not text or not isinstance(text, str):
+        if not text:
             return None
 
         result = genai.embed_content(
             model=EMBEDDING_MODEL,
-            content=text
+            content=text,
         )
 
         return result["embedding"]
 
     except Exception as e:
-        print(f"🔥 Gemini Error Detail: {str(e)}")
+        print(f"🔥 Gemini Error: {e}")
         return None
 
 
 def background_sync_embeddings():
-    """Sync old movies without embedding"""
-    print("--- Start scanning DB for missing embeddings ---")
+    print("🔄 Sync embeddings...")
 
     query = {"fullplot": {"$exists": True}, VECTOR_FIELD_PATH: {"$exists": False}}
     cursor = movies_col.find(query).limit(50)
 
-    count = 0
+    updated = 0
     for doc in cursor:
         vector = get_single_embedding(doc["fullplot"])
         if vector:
             movies_col.update_one(
                 {"_id": doc["_id"]},
-                {"$set": {VECTOR_FIELD_PATH: vector}}
+                {"$set": {VECTOR_FIELD_PATH: vector}},
             )
-            count += 1
+            updated += 1
 
-    print(f"--- Done! Updated {count} movies ---")
+    print(f"✅ Synced {updated} movies")
 
 
 # ===============================
-# 4. API ENDPOINTS
+# 6. API ENDPOINTS
 # ===============================
 @app.post("/classify")
 async def classify_movie(query: MovieQuery):
@@ -133,45 +139,42 @@ async def classify_movie(query: MovieQuery):
                     "path": VECTOR_FIELD_PATH,
                     "queryVector": user_vector,
                     "numCandidates": 100,
-                    "limit": 5
+                    "limit": 5,
                 }
             },
             {
                 "$project": {
                     "title": 1,
                     "genres": 1,
-                    "score": {"$meta": "vectorSearchScore"}
+                    "score": {"$meta": "vectorSearchScore"},
                 }
-            }
+            },
         ]
 
         neighbors = list(movies_col.aggregate(pipeline))
 
         if not neighbors:
-            return {
-                "predicted_genre": "Unknown",
-                "message": "No similar movies found"
-            }
+            return {"predicted_genre": "Unknown", "message": "No similar movies"}
 
-        # Step 3: majority vote genre
-        all_genres = []
+        # Step 3: majority vote
+        genres = []
         for n in neighbors:
-            all_genres.extend(n.get("genres", []))
+            genres.extend(n.get("genres", []))
 
-        predicted_genre = max(set(all_genres), key=all_genres.count) if all_genres else "Unknown"
+        predicted = max(set(genres), key=genres.count) if genres else "Unknown"
 
         return {
             "input_description": query.description,
-            "predicted_genre": predicted_genre,
+            "predicted_genre": predicted,
             "confidence_score": neighbors[0].get("score", 0),
             "similar_movies": [
                 {
                     "title": n.get("title"),
                     "genres": n.get("genres"),
-                    "score": n.get("score")
+                    "score": n.get("score"),
                 }
                 for n in neighbors
-            ]
+            ],
         }
 
     except Exception as e:
@@ -189,15 +192,15 @@ async def trigger_sync(background_tasks: BackgroundTasks):
 def health():
     return {
         "status": "ready",
-        "port": PORT,
         "model": EMBEDDING_MODEL,
-        "db_connected": DB_NAME in client.list_database_names()
+        "db_connected": DB_NAME in client.list_database_names(),
     }
 
 
 # ===============================
-# 5. MAIN
+# 7. MAIN
 # ===============================
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=PORT)
