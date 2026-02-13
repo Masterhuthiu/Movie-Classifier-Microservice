@@ -2,14 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Cài đặt các thư viện cần thiết
+# Cài đặt thư viện
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy toàn bộ code vào container
+# Copy toàn bộ code
 COPY . .
 
-# Port microservice của bạn
+# Thêm biến môi trường để Python nhận diện thư mục app là một module
+ENV PYTHONPATH=/app
+
 EXPOSE 8083
 
-CMD ["python", "main.py"]
+# Chạy app dưới dạng module để xử lý các lệnh import tốt hơn
+CMD ["python", "-m", "app.main"]

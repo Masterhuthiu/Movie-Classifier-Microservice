@@ -1,47 +1,53 @@
 import google.generativeai as genai
 import os
 from typing import List
+import asyncio
 
 class AIService:
     def __init__(self):
-        # Lấy API Key từ biến môi trường
+        # Lấy API Key từ Secret của Kubernetes
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            print("❌ LỖI: GEMINI_API_KEY chưa được cấu hình!")
+            print("❌ LỖI: GEMINI_API_KEY không tìm thấy trong biến môi trường!")
             self.enabled = False
             return
         
         try:
             genai.configure(api_key=api_key)
-            # Dùng embedding-001 để đảm bảo 768 dimensions khớp MongoDB Index
+            # Model này trả về vector 768 chiều, khớp với cấu hình Index của bạn
             self.model_name = 'models/embedding-001'
             self.enabled = True
-            print(f"✅ AIService initialized with model: {self.model_name}")
+            print(f"🚀 AIService đã sẵn sàng với model: {self.model_name}")
         except Exception as e:
-            print(f"❌ Lỗi cấu hình Gemini: {e}")
+            print(f"❌ Lỗi khi cấu hình Google AI: {str(e)}")
             self.enabled = False
 
     async def get_embedding(self, text: str) -> List[float]:
         if not self.enabled:
-            raise Exception("AI Service is not configured properly")
+            raise Exception("AI Service chưa được cấu hình đúng. Kiểm tra API Key.")
 
         try:
-            # Gọi API đồng bộ trong thread (SDK của Google hiện chưa hỗ trợ async thuần)
-            result = genai.embed_content(
-                model=self.model_name,
-                content=text,
-                task_type="retrieval_query"
+            # Chạy hàm embed_content (đồng bộ) trong một thread riêng để không chặn FastAPI
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, 
+                lambda: genai.embed_content(
+                    model=self.model_name,
+                    content=text,
+                    task_type="retrieval_query"
+                )
             )
             
-            # Đảm bảo trả về đúng định dạng list float
             if 'embedding' in result:
+                print(f"✅ Đã tạo thành công vector cho text: '{text[:30]}...'")
                 return result['embedding']
             else:
-                raise Exception("Phản hồi từ Gemini không chứa dữ liệu embedding")
-            
+                raise Exception("Phản hồi từ Gemini không có trường 'embedding'")
+                
         except Exception as e:
             print(f"🔥 Lỗi AI Embedding chi tiết: {str(e)}")
+            # Trả về lỗi rõ ràng để Gateway/User nhận diện được
             raise Exception(f"Gemini API Error: {str(e)}")
 
-# Khởi tạo instance duy nhất để dùng chung
+# Khởi tạo instance duy nhất (Singleton)
 ai_service = AIService()
