@@ -17,7 +17,6 @@ MONGO_URI = os.getenv(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
 PORT = int(os.getenv("PORT", 8083))
 
 DB_NAME = "sample_mflix"
@@ -25,8 +24,10 @@ COLLECTION_NAME = "movies"
 VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
-# ✅ Model embedding chuẩn 768 dim
-EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-001"  # 768 dim
+
+CONSUL_HOST = os.getenv("CONSUL_HOST", "consul-server")
+SERVICE_NAME = "movie-classifier"
 
 # ===============================
 # 2. INIT SERVICES
@@ -35,7 +36,7 @@ client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
 movies_col = db[COLLECTION_NAME]
 
-# Init Gemini client
+# Gemini client
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     print("✅ Gemini Client ready (768-dim)")
@@ -43,48 +44,71 @@ else:
     ai_client = None
     print("❌ GEMINI_API_KEY missing")
 
+
 class MovieQuery(BaseModel):
     description: str
 
-# ===============================
-# 3. CONSUL + LIFESPAN
-# ===============================
-def get_single_embedding(text: str):
-    try:
-        if not text or ai_client is None:
-            print("❌ Missing text or Gemini client")
-            return None
 
-        result = ai_client.models.embed_content(
-            model="models/gemini-embedding-001",   # 🔥 PHẢI là model này
-            contents=text
+# ===============================
+# 3. CONSUL REGISTER
+# ===============================
+def register_to_consul():
+    """
+    Đăng ký service vào Consul khi start container
+    """
+    try:
+        c = consul.Consul(host=CONSUL_HOST, port=8500)
+
+        hostname = socket.gethostname()
+        service_id = f"{SERVICE_NAME}-{hostname}"
+
+        c.agent.service.register(
+            name=SERVICE_NAME,
+            service_id=service_id,
+            address=hostname,
+            port=PORT,
+            check=consul.Check.http(
+                url=f"http://{hostname}:{PORT}/health",
+                interval="10s",
+                timeout="5s",
+                deregister="1m",
+            ),
         )
 
-        vector = result.embeddings[0].values
-
-        print(f"✅ Embedding OK | dim={len(vector)}")
-
-        if len(vector) != 768:
-            print(f"❌ Wrong vector size: {len(vector)}")
-            return None
-
-        return vector
+        print(f"✅ Registered to Consul: {service_id}:{PORT}")
 
     except Exception as e:
-        print(f"🔥 REAL Gemini Error: {e}")
-        return None
+        print(f"⚠️ Consul register failed: {e}")
+
+
+def deregister_from_consul():
+    """
+    Hủy đăng ký khi pod shutdown
+    """
+    try:
+        c = consul.Consul(host=CONSUL_HOST, port=8500)
+        hostname = socket.gethostname()
+        service_id = f"{SERVICE_NAME}-{hostname}"
+
+        c.agent.service.deregister(service_id)
+        print("🔻 Deregistered from Consul")
+
+    except Exception as e:
+        print(f"⚠️ Consul deregister failed: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     register_to_consul()
     yield
-    print("🔻 Shutdown service")
+    deregister_from_consul()
+
 
 app = FastAPI(title="Movie AI Classifier (768-dim)", lifespan=lifespan)
 
+
 # ===============================
-# 4. GEMINI EMBEDDING LOGIC
+# 4. GEMINI EMBEDDING
 # ===============================
 def get_single_embedding(text: str):
     """
@@ -101,7 +125,6 @@ def get_single_embedding(text: str):
 
         vector = result.embeddings[0].values
 
-        # đảm bảo đúng 768 dim
         if len(vector) != 768:
             print(f"❌ Wrong vector size: {len(vector)}")
             return None
@@ -212,4 +235,5 @@ def health():
 # ===============================
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=PORT)
