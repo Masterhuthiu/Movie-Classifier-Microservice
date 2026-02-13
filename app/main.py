@@ -56,13 +56,17 @@ def get_single_embedding(text: str):
             return None
 
         result = ai_client.models.embed_content(
-            model="models/gemini-embedding-001",
+            model="models/gemini-embedding-001",   # 🔥 PHẢI là model này
             contents=text
         )
 
         vector = result.embeddings[0].values
 
         print(f"✅ Embedding OK | dim={len(vector)}")
+
+        if len(vector) != 768:
+            print(f"❌ Wrong vector size: {len(vector)}")
+            return None
 
         return vector
 
