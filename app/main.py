@@ -24,7 +24,7 @@ VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
 # 🔥 Model embedding đúng chuẩn SDK mới
-EMBEDDING_MODEL = "models/embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 # ===============================
 # 2. INIT SERVICES
