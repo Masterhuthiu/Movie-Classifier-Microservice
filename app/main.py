@@ -5,7 +5,7 @@ import consul
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from pymongo import MongoClient
-import google.genai as genai
+import google.generativeai as genai  # ✅ Đúng
 from urllib.parse import quote_plus
 
 app = FastAPI(title="Movie AI Classifier Microservice")
