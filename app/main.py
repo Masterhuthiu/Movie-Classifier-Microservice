@@ -49,26 +49,27 @@ class MovieQuery(BaseModel):
 # ===============================
 # 3. CONSUL + LIFESPAN
 # ===============================
-def register_to_consul():
+def get_single_embedding(text: str):
     try:
-        consul_host = os.getenv("CONSUL_HOST", "consul-server-service")
-        c = consul.Consul(host=consul_host, port=8500)
+        if not text or ai_client is None:
+            print("❌ Missing text or Gemini client")
+            return None
 
-        hostname = socket.gethostname()
-        ip_addr = socket.gethostbyname(hostname)
-
-        c.agent.service.register(
-            name="movie-classifier-service",
-            service_id=f"classifier-{PORT}",
-            address=ip_addr,
-            port=PORT,
-            check=consul.Check.http(f"http://{ip_addr}:{PORT}/health", interval="10s"),
+        result = ai_client.models.embed_content(
+            model="models/gemini-embedding-001",
+            contents=text
         )
 
-        print(f"✅ Registered to Consul: {ip_addr}:{PORT}")
+        vector = result.embeddings[0].values
+
+        print(f"✅ Embedding OK | dim={len(vector)}")
+
+        return vector
 
     except Exception as e:
-        print(f"❌ Consul error: {e}")
+        print(f"🔥 REAL Gemini Error: {e}")
+        return None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
