@@ -10,13 +10,14 @@ from google import genai
 from google.genai import types
 
 # ===============================
-# 1. CONFIG
+# 1. CẤU HÌNH (CONFIG)
 # ===============================
 MONGO_URI = os.getenv(
     "MONGO_URI",
     "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority",
 )
-GEMINI_API_KEY = "AIzaSyDDlIjhAUI2H1tIxzzWguWKZ3IeEysAsME" #os.getenv("GEMINI_API_KEY")
+# Khuyên dùng: Nên để API Key trong Environment Variable nếu có thể
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDDlIjhAUI2H1tIxzzWguWKZ3IeEysAsME")
 PORT = int(os.getenv("PORT", 8083))
 
 DB_NAME = "sample_mflix"
@@ -24,11 +25,11 @@ COLLECTION_NAME = "movies"
 VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
-# Model Gemini chuẩn 768 dimensions
+# Ép sử dụng model v001 để luôn ra 768 dimensions
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 # ===============================
-# 2. INIT SERVICES
+# 2. KHỞI TẠO DỊCH VỤ (INIT)
 # ===============================
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
@@ -39,7 +40,7 @@ if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     ai_client = None
-    print("❌ ERROR: GEMINI_API_KEY is missing!")
+    print("❌ LỖI: Thiếu GEMINI_API_KEY!")
 
 class MovieQuery(BaseModel):
     description: str
@@ -53,6 +54,7 @@ def register_to_consul():
         c = consul.Consul(host=consul_host, port=8500)
         hostname = socket.gethostname()
         ip_addr = socket.gethostbyname(hostname)
+        
         c.agent.service.register(
             name="movie-classifier-service",
             service_id=f"classifier-{PORT}",
@@ -60,59 +62,75 @@ def register_to_consul():
             port=PORT,
             check=consul.Check.http(f"http://{ip_addr}:{PORT}/health", interval="10s"),
         )
-        print(f"✅ Registered to Consul: {ip_addr}:{PORT}")
+        print(f"✅ Đã đăng ký với Consul: {ip_addr}:{PORT}")
     except Exception as e:
-        print(f"❌ Consul Error: {e}")
+        print(f"❌ Lỗi Consul: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Đăng ký dịch vụ khi startup
     register_to_consul()
     yield
-    print("🔻 Shutting down...")
+    # Cleanup khi shutdown (nếu cần)
+    print("🔻 Đang dừng dịch vụ...")
 
-app = FastAPI(title="Movie AI Classifier (Online)", lifespan=lifespan)
+app = FastAPI(title="Movie AI Classifier (768 Dim)", lifespan=lifespan)
 
 # ===============================
-# 4. GEMINI LOGIC
+# 4. LOGIC XỬ LÝ VECTOR (GEMINI)
 # ===============================
 def get_single_embedding(text: str):
+    """Tạo vector 768 chiều từ text bằng Gemini API"""
     try:
         if not text or ai_client is None:
             return None
 
-        # Sửa lại dòng này để chỉ định rõ model 001 (768 dim)
+        # Chỉ định rõ model 001 để khớp với Index 768 chiều trong MongoDB
         result = ai_client.models.embed_content(
-            model="models/gemini-embedding-001", # <--- Phải là 001
+            model=EMBEDDING_MODEL,
             contents=text,
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
-        return result.embeddings[0].values
+        vector = result.embeddings[0].values
+        
+        # Kiểm tra nhanh số chiều
+        if len(vector) != 768:
+            print(f"⚠️ Cảnh báo: Vector trả về {len(vector)} chiều, mong muốn 768.")
+            
+        return vector
     except Exception as e:
-        print(f"🔥 Gemini Error: {e}")
+        print(f"🔥 Lỗi tạo Embedding: {e}")
         return None
 
 def background_sync_embeddings():
-    print("🔄 Syncing embeddings...")
+    """Tạo vector cho các phim chưa có embedding trong DB (Giới hạn 50 phim mỗi lần)"""
+    print("🔄 Đang đồng bộ vector cho dữ liệu phim...")
     query = {"fullplot": {"$exists": True}, VECTOR_FIELD_PATH: {"$exists": False}}
     cursor = movies_col.find(query).limit(50)
     updated = 0
     for doc in cursor:
         vector = get_single_embedding(doc["fullplot"])
         if vector:
-            movies_col.update_one({"_id": doc["_id"]}, {"$set": {VECTOR_FIELD_PATH: vector}})
+            movies_col.update_one(
+                {"_id": doc["_id"]}, 
+                {"$set": {VECTOR_FIELD_PATH: vector}}
+            )
             updated += 1
-    print(f"✅ Synced {updated} movies.")
+    print(f"✅ Đã cập nhật vector cho {updated} phim.")
 
 # ===============================
-# 5. API ENDPOINTS
+# 5. CÁC API ENDPOINTS
 # ===============================
 @app.post("/classify")
 async def classify_movie(query: MovieQuery):
+    """Tìm phim tương đương và dự đoán thể loại bằng Vector Search"""
     try:
+        # 1. Chuyển mô tả người dùng thành vector 768 dim
         user_vector = get_single_embedding(query.description)
         if not user_vector:
             raise HTTPException(status_code=500, detail="Gemini embedding failed")
 
+        # 2. Truy vấn Vector Search trên MongoDB Atlas
         pipeline = [
             {
                 "$vectorSearch": {
@@ -125,15 +143,18 @@ async def classify_movie(query: MovieQuery):
             },
             {
                 "$project": {
-                    "title": 1, "genres": 1, "score": {"$meta": "vectorSearchScore"}
+                    "title": 1, 
+                    "genres": 1, 
+                    "score": {"$meta": "vectorSearchScore"}
                 }
             },
         ]
 
         neighbors = list(movies_col.aggregate(pipeline))
         if not neighbors:
-            return {"predicted_genre": "Unknown", "message": "No matches found"}
+            return {"predicted_genre": "Unknown", "message": "Không tìm thấy phim tương đồng"}
 
+        # 3. Dự đoán thể loại dựa trên số đông các phim tìm được
         genres = []
         for n in neighbors:
             genres.extend(n.get("genres", []))
@@ -146,17 +167,26 @@ async def classify_movie(query: MovieQuery):
             "matches": neighbors
         }
     except Exception as e:
+        print(f"❌ Lỗi API Classify: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/sync-embeddings")
 async def trigger_sync(background_tasks: BackgroundTasks):
+    """Kích hoạt tiến trình chạy ngầm để tạo vector cho DB"""
     background_tasks.add_task(background_sync_embeddings)
-    return {"message": "Sync started in background"}
+    return {"message": "Tiến trình đồng bộ đang chạy ngầm..."}
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "mode": "Online (Gemini)"}
+    """Kiểm tra trạng thái dịch vụ"""
+    return {
+        "status": "ok", 
+        "model": EMBEDDING_MODEL, 
+        "dimensions": 768,
+        "mode": "Online (Gemini)"
+    }
 
 if __name__ == "__main__":
     import uvicorn
+    # Lắng nghe tại port 8083 để khớp với Kubernetes Service
     uvicorn.run(app, host="0.0.0.0", port=PORT)
