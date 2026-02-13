@@ -25,7 +25,7 @@ VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
 # 🔥 FIX QUAN TRỌNG: model embedding đúng API 2025
-EMBEDDING_MODEL = "embedding-001"
+EMBEDDING_MODEL = "models/embedding-001"
 
 # MongoDB
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
