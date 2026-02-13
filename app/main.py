@@ -80,8 +80,9 @@ def get_single_embedding(text: str):
         if not text or ai_client is None:
             return None
 
+        # Sửa lại dòng này để chỉ định rõ model 001 (768 dim)
         result = ai_client.models.embed_content(
-            model=EMBEDDING_MODEL,
+            model="models/gemini-embedding-001", # <--- Phải là 001
             contents=text,
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
