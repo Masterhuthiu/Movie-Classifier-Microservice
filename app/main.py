@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from pymongo import MongoClient
-from google import genai  # 🔥 SDK google-genai mới nhất
+from google import genai  # 🔥 Dùng cho google-genai==0.3.0
 from google.genai import types
 from typing import List
 
@@ -25,36 +25,38 @@ COLLECTION_NAME = "movies"
 VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
-# Model bạn chọn - Rất ổn định với 768 dims
-EMBEDDING_MODEL = "gemini-embedding-001" 
+# Tên model đầy đủ theo chuẩn SDK mới
+EMBEDDING_MODEL = "models/gemini-embedding-001" 
 
 # ===============================
-# 2. KHỞI TẠO KẾT NỐI (SERVICES)
+# 2. KHỞI TẠO SERVICES
 # ===============================
-# Kết nối MongoDB
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
 movies_col = db[COLLECTION_NAME]
 
-# Khởi tạo Gemini Client (Dùng SDK google-genai 0.3.0)
-if GEMINI_API_KEY:
-    ai_client = genai.Client(api_key=GEMINI_API_KEY)
-    print(f"✅ Gemini AI Client initialized with: {EMBEDDING_MODEL}")
-else:
+# Khởi tạo Client
+try:
+    if GEMINI_API_KEY:
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        print(f"✅ Gemini Client initialized. Model: {EMBEDDING_MODEL}")
+    else:
+        ai_client = None
+        print("❌ CRITICAL: GEMINI_API_KEY is missing from Env!")
+except Exception as e:
     ai_client = None
-    print("❌ ERROR: GEMINI_API_KEY is missing!")
+    print(f"❌ Failed to init Gemini Client: {e}")
 
 class MovieQuery(BaseModel):
     description: str
 
 # ===============================
-# 3. ĐĂNG KÝ CONSUL (SERVICE DISCOVERY)
+# 3. CONSUL & LIFESPAN
 # ===============================
 def register_to_consul():
     try:
         consul_host = os.getenv("CONSUL_HOST", "consul-server")
         c = consul.Consul(host=consul_host, port=8500)
-
         hostname = socket.gethostname()
         ip_addr = socket.gethostbyname(hostname)
 
@@ -65,30 +67,26 @@ def register_to_consul():
             port=PORT,
             check=consul.Check.http(f"http://{ip_addr}:{PORT}/health", interval="10s"),
         )
-        print(f"✅ Registered to Consul at {ip_addr}:{PORT}")
+        print(f"✅ Registered to Consul: {ip_addr}:{PORT}")
     except Exception as e:
-        print(f"❌ Consul registration failed: {e}")
+        print(f"❌ Consul Error: {e}")
 
-# ===============================
-# 4. LIFESPAN (QUẢN LÝ STARTUP/SHUTDOWN)
-# ===============================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Khi app bắt đầu
     register_to_consul()
     yield
-    # Khi app tắt
-    print("🔻 Service shutting down")
+    print("🔻 Shutting down...")
 
-app = FastAPI(title="Movie AI Classifier Microservice", lifespan=lifespan)
+app = FastAPI(title="Movie AI Classifier", lifespan=lifespan)
 
 # ===============================
-# 5. AI LOGIC (VECTOR EMBEDDING)
+# 4. AI LOGIC (Embedding)
 # ===============================
 def get_single_embedding(text: str):
-    """Tạo vector 768-dims sử dụng SDK google-genai 0.3.0"""
+    """Tạo vector 768-dims và in lỗi chi tiết nếu thất bại"""
     try:
         if not text or ai_client is None:
+            print("⚠️ Embedding skip: Text empty or Client not ready")
             return None
 
         # Gọi API tạo vector
@@ -98,43 +96,42 @@ def get_single_embedding(text: str):
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
 
-        # Trả về list các số float (768 dimensions)
-        return result.embeddings[0].values
+        if result and result.embeddings:
+            return result.embeddings[0].values
+        
+        print("⚠️ Gemini returned empty embeddings list")
+        return None
 
     except Exception as e:
-        print(f"🔥 Gemini Error ({EMBEDDING_MODEL}): {e}")
+        # ⚡ ĐÂY LÀ DÒNG QUAN TRỌNG ĐỂ DEBUG TRÊN K8S
+        print(f"🔥 Gemini Error Detail: {str(e)}")
         return None
 
 def background_sync_embeddings():
-    """Tự động tạo vector cho các phim chưa có trong database"""
-    print("🔄 Starting background sync...")
+    print("🔄 Background sync started...")
     query = {"fullplot": {"$exists": True}, VECTOR_FIELD_PATH: {"$exists": False}}
     cursor = movies_col.find(query).limit(50)
-
     updated = 0
     for doc in cursor:
         vector = get_single_embedding(doc["fullplot"])
         if vector:
-            movies_col.update_one(
-                {"_id": doc["_id"]},
-                {"$set": {VECTOR_FIELD_PATH: vector}},
-            )
+            movies_col.update_one({"_id": doc["_id"]}, {"$set": {VECTOR_FIELD_PATH: vector}})
             updated += 1
-    print(f"✅ Background sync completed. Updated {updated} movies.")
+    print(f"✅ Sync done. Updated {updated} docs.")
 
 # ===============================
-# 6. API ENDPOINTS
+# 5. API ENDPOINTS
 # ===============================
-
 @app.post("/classify")
 async def classify_movie(query: MovieQuery):
     try:
-        # Bước 1: Chuyển text mô tả phim thành vector
+        # 1. Tạo embedding
         user_vector = get_single_embedding(query.description)
         if not user_vector:
-            raise HTTPException(status_code=500, detail="Gemini embedding failed")
+            # Trả về lỗi chi tiết hơn thay vì 500 chung chung
+            raise HTTPException(status_code=500, detail="Gemini failed. Check Pod logs for 🔥 error.")
 
-        # Bước 2: Tìm kiếm Vector (Vector Search) trên MongoDB Atlas
+        # 2. Vector Search
         pipeline = [
             {
                 "$vectorSearch": {
@@ -147,9 +144,7 @@ async def classify_movie(query: MovieQuery):
             },
             {
                 "$project": {
-                    "title": 1,
-                    "genres": 1,
-                    "score": {"$meta": "vectorSearchScore"},
+                    "title": 1, "genres": 1, "score": {"$meta": "vectorSearchScore"}
                 }
             },
         ]
@@ -157,56 +152,34 @@ async def classify_movie(query: MovieQuery):
         neighbors = list(movies_col.aggregate(pipeline))
 
         if not neighbors:
-            return {"predicted_genre": "Unknown", "message": "No similar movies found in database"}
+            return {"predicted_genre": "Unknown", "message": "No matches in DB"}
 
-        # Bước 3: Thuật toán KNN (Lấy thể loại xuất hiện nhiều nhất)
+        # 3. Predict Genre
         all_genres = []
         for n in neighbors:
             all_genres.extend(n.get("genres", []))
-
+        
         predicted = max(set(all_genres), key=all_genres.count) if all_genres else "Unknown"
 
         return {
-            "input_description": query.description,
             "predicted_genre": predicted,
-            "confidence_score": neighbors[0].get("score", 0),
-            "similar_movies": [
-                {
-                    "title": n.get("title"),
-                    "genres": n.get("genres"),
-                    "score": n.get("score"),
-                }
-                for n in neighbors
-            ],
+            "confidence": neighbors[0].get("score", 0),
+            "matches": neighbors
         }
 
     except Exception as e:
-        print(f"❌ Classify Error: {e}")
+        print(f"❌ API Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/sync-embeddings")
 async def trigger_sync(background_tasks: BackgroundTasks):
     background_tasks.add_task(background_sync_embeddings)
-    return {"message": "Background sync process started..."}
+    return {"message": "Syncing..."}
 
 @app.get("/health")
 def health():
-    # Kiểm tra trạng thái DB và Model
-    db_ok = False
-    try:
-        db_ok = DB_NAME in client.list_database_names()
-    except:
-        db_ok = False
-        
-    return {
-        "status": "ready",
-        "model": EMBEDDING_MODEL,
-        "db_connected": db_ok,
-    }
+    return {"status": "ok", "model": EMBEDDING_MODEL, "api_ready": ai_client is not None}
 
-# ===============================
-# 7. CHẠY SERVER
-# ===============================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
