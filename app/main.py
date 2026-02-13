@@ -14,7 +14,7 @@ app = FastAPI(title="Movie AI Classifier Microservice")
 # ===============================
 # 1. CẤU HÌNH (Khớp với Secret & Atlas)
 # ===============================
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://cosa199212:password@cluster0.3jl7a.mongodb.net/")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.getenv("PORT", 8083))
 
