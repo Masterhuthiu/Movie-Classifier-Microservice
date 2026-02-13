@@ -116,14 +116,20 @@ def get_single_embedding(text: str):
     """
     try:
         if not text or ai_client is None:
+            print("❌ Missing text or Gemini client")
             return None
 
         result = ai_client.models.embed_content(
             model=EMBEDDING_MODEL,
             contents=text,
+            config={
+                "output_dimensionality": 768   # 🔥 QUAN TRỌNG
+            }
         )
 
         vector = result.embeddings[0].values
+
+        print(f"📏 Vector size = {len(vector)}")
 
         if len(vector) != 768:
             print(f"❌ Wrong vector size: {len(vector)}")
@@ -132,8 +138,9 @@ def get_single_embedding(text: str):
         return vector
 
     except Exception as e:
-        print(f"🔥 Gemini embedding error: {e}")
+        print(f"🔥 REAL Gemini Error: {e}")
         return None
+
 
 
 def background_sync_embeddings():
