@@ -17,7 +17,14 @@ MONGO_URI = os.getenv(
     "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority",
 )
 # Khuyên dùng: Nên để API Key trong Environment Variable nếu có thể
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDDlIjhAUI2H1tIxzzWguWKZ3IeEysAsME")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    ai_client = None
+    print("❌ ERROR: GEMINI_API_KEY is missing!")
+    
 PORT = int(os.getenv("PORT", 8083))
 
 DB_NAME = "sample_mflix"
