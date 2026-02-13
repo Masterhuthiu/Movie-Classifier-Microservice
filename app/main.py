@@ -16,7 +16,7 @@ MONGO_URI = os.getenv(
     "MONGO_URI",
     "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority",
 )
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = "AIzaSyDDlIjhAUI2H1tIxzzWguWKZ3IeEysAsME" #os.getenv("GEMINI_API_KEY")
 PORT = int(os.getenv("PORT", 8083))
 
 DB_NAME = "sample_mflix"
