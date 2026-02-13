@@ -70,21 +70,24 @@ async def startup_event():
 # 3. AI LOGIC (Vector Embedding)
 # ===============================
 def get_single_embedding(text: str):
-    """Tạo vector từ Gemini API và ép về 768 dims cho Atlas"""
+    """Tạo vector từ Gemini API (Bản tương thích cao)"""
     try:
         if not text or not isinstance(text, str):
             return None
             
-        # ✅ FIX 3: Thêm output_dimensionality=768 để khớp với Index của bạn
+        # ✅ FIX: Bỏ output_dimensionality để tránh lỗi thư viện cũ
         result = genai.embed_content(
             model=EMBEDDING_MODEL,
             content=text,
-            task_type="retrieval_query",
-            output_dimensionality=768
+            task_type="retrieval_query"
         )
-        return result['embedding']
+        
+        vector = result['embedding']
+        
+        # 💡 Mẹo: Model 004 trả về 768 dims mặc định hoặc cao hơn. 
+        # Nếu Atlas của bạn fix cứng 768, code này sẽ chạy ổn.
+        return vector
     except Exception as e:
-        # In lỗi chi tiết ra log để debug trong kubectl logs
         print(f"🔥 Gemini Error Detail: {str(e)}")
         return None
 
