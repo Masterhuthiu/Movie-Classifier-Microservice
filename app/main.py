@@ -26,6 +26,7 @@ VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
 # 🔥 Embedding model 768-dim
 EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
+EMBEDDING_DIM = 768
 
 # ===============================
 # 2. INIT SERVICES
@@ -34,16 +35,18 @@ client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
 movies_col = db[COLLECTION_NAME]
 
-# Load MiniLM model
+# Load embedding model
 try:
     embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    print(f"✅ Embedding model loaded: {EMBEDDING_MODEL_NAME} (768 dim)")
+    print(f"✅ Embedding model loaded: {EMBEDDING_MODEL_NAME} ({EMBEDDING_DIM} dim)")
 except Exception as e:
     embedding_model = None
     print(f"❌ Failed to load embedding model: {e}")
 
+
 class MovieQuery(BaseModel):
     description: str
+
 
 # ===============================
 # 3. CONSUL + LIFESPAN
@@ -69,13 +72,16 @@ def register_to_consul():
     except Exception as e:
         print(f"❌ Consul Error: {e}")
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     register_to_consul()
     yield
     print("🔻 Shutting down...")
 
+
 app = FastAPI(title="Movie AI Classifier", lifespan=lifespan)
+
 
 # ===============================
 # 4. EMBEDDING LOGIC (768 dim)
@@ -88,8 +94,8 @@ def get_single_embedding(text: str):
 
         vector = embedding_model.encode(text).tolist()
 
-        # đảm bảo đúng 768 chiều
-        if len(vector) != 768:
+        # ensure correct dimension
+        if len(vector) != EMBEDDING_DIM:
             print(f"❌ Wrong embedding size: {len(vector)}")
             return None
 
@@ -162,7 +168,7 @@ async def classify_movie(query: MovieQuery):
         if not neighbors:
             return {"predicted_genre": "Unknown", "message": "No matches in DB"}
 
-        # 3️⃣ Predict genre bằng majority vote
+        # 3️⃣ Predict genre by majority vote
         all_genres: List[str] = []
 
         for n in neighbors:
@@ -192,7 +198,7 @@ def health():
     return {
         "status": "ok",
         "embedding_model": EMBEDDING_MODEL_NAME,
-        "vector_dim": 768,
+        "vector_dim": EMBEDDING_DIM,
         "model_ready": embedding_model is not None,
     }
 
@@ -202,4 +208,5 @@ def health():
 # ===============================
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=PORT)
