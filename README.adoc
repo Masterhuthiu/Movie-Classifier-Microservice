@@ -34,9 +34,9 @@ The architecture follows a modern **Cloud-Native** pattern, decoupled for scalab
 
 == 3. Core Logic & Mathematical Foundation
 
-The service converts the natural language query into a vector space representation. The similarity between the query vector \(V_q\) and movie vectors \(V_m\) is calculated using **Cosine Similarity**:
+The service converts the natural language query into a vector space representation. The similarity between the query vector and movie vectors is calculated using **Cosine Similarity**:
 
-\[ \text{similarity} = \frac{V_q \cdot V_m}{\|V_q\| \|V_m\|} \]
+
 
 
 
