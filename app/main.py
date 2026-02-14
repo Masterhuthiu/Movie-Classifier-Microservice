@@ -11,14 +11,13 @@ from google import genai
 from google.genai import types
 
 # ===============================
-# 1. CONFIGURATION (Environment Variables)
+# 1. CONFIGURATION
 # ===============================
 MONGO_URI = os.getenv(
     "MONGO_URI",
     "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority",
 )
 
-# Nhận API KEY từ môi trường (Codespaces Secret hoặc K8s Secret)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.getenv("PORT", 8083))
 
@@ -27,8 +26,8 @@ COLLECTION_NAME = "movies"
 VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
-# Sử dụng model mới nhất nhưng sẽ ép về 768 dim
-EMBEDDING_MODEL = "models/text-embedding-004" 
+# ĐỔI THÀNH MODEL 001 ĐỂ TRÁNH LỖI 404
+EMBEDDING_MODEL = "models/gemini-embedding-001" 
 
 CONSUL_HOST = os.getenv("CONSUL_HOST", "consul-server")
 SERVICE_NAME = "movie-classifier"
@@ -42,7 +41,7 @@ movies_col = db[COLLECTION_NAME]
 
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
-    print("✅ Gemini Client ready (Auto 768-dim mode)")
+    print(f"✅ Gemini Client ready (Using {EMBEDDING_MODEL})")
 else:
     ai_client = None
     print("⚠️ WARNING: GEMINI_API_KEY is missing!")
@@ -51,7 +50,7 @@ class MovieQuery(BaseModel):
     description: str
 
 # ===============================
-# 3. SERVICE DISCOVERY (CONSUL)
+# 3. CONSUL (SERVICE DISCOVERY)
 # ===============================
 def register_to_consul():
     try:
@@ -91,33 +90,38 @@ async def lifespan(app: FastAPI):
     yield
     deregister_from_consul()
 
-app = FastAPI(title="Movie AI Classifier Microservice", lifespan=lifespan)
+app = FastAPI(title="Movie AI Classifier", lifespan=lifespan)
 
 # ===============================
-# 4. CORE LOGIC (EMBEDDING & SYNC)
+# 4. CORE LOGIC
 # ===============================
 def get_single_embedding(text: str):
-    """Tạo embedding và ép về đúng 768 chiều cho MongoDB Index"""
+    """Tạo embedding 768 chiều cho MongoDB Index"""
     try:
         if not text or ai_client is None:
             return None
 
+        # Sử dụng config để ép dimensionality về 768
         result = ai_client.models.embed_content(
             model=EMBEDDING_MODEL,
             contents=text,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_QUERY",
-                output_dimensionality=768  # 🔥 Khắc phục lỗi 3072 vs 768
+                output_dimensionality=768
             )
         )
         vector = result.embeddings[0].values
+        
+        # In log để kiểm tra trong kubectl logs
+        print(f"📏 Created vector: {len(vector)} dimensions for text: '{text[:30]}...'")
+        
         return vector
     except Exception as e:
         print(f"🔥 Gemini API Error: {e}")
         return None
 
 def background_sync_embeddings():
-    """Tự động cập nhật vector cho các phim chưa có (Chạy ngầm)"""
+    print("🔄 Starting background sync...")
     query = {"fullplot": {"$exists": True}, VECTOR_FIELD_PATH: {"$exists": False}}
     cursor = movies_col.find(query).limit(50)
     
@@ -130,14 +134,15 @@ def background_sync_embeddings():
                 {"$set": {VECTOR_FIELD_PATH: vector}},
             )
             updated += 1
-    print(f"✅ Background Sync: Updated {updated} movies.")
+    print(f"✅ Background Sync Complete: Updated {updated} movies.")
 
 # ===============================
 # 5. API ENDPOINTS
 # ===============================
 @app.post("/classify")
 async def classify_movie(query: MovieQuery):
-    """Dùng mô tả để tìm thể loại phim phù hợp nhất"""
+    print(f"📩 Received request: {query.description}")
+    
     user_vector = get_single_embedding(query.description)
     if not user_vector:
         raise HTTPException(status_code=500, detail="Gemini embedding failed")
@@ -166,7 +171,6 @@ async def classify_movie(query: MovieQuery):
         if not neighbors:
             return {"predicted_genre": "Unknown", "message": "No matches found"}
 
-        # Thuật toán Majority Vote để đoán thể loại
         all_genres = []
         for n in neighbors:
             all_genres.extend(n.get("genres", []))
@@ -179,22 +183,17 @@ async def classify_movie(query: MovieQuery):
             "matches": neighbors,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database Search Error: {str(e)}")
+        print(f"❌ DB Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/sync-embeddings")
 async def trigger_sync(background_tasks: BackgroundTasks):
-    """Endpoint để nạp thêm vector vào DB mà không làm treo API"""
     background_tasks.add_task(background_sync_embeddings)
-    return {"message": "Background sync process started for 50 movies."}
+    return {"message": "Sync started in background."}
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "service": SERVICE_NAME,
-        "dimensions": 768,
-        "db_connected": client is not None
-    }
+    return {"status": "ok", "dimensions": 768}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
