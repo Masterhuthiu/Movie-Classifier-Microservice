@@ -26,7 +26,7 @@ COLLECTION_NAME = "movies"
 VECTOR_INDEX_NAME = "movies_vector_index"
 VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
 
-# ĐỔI THÀNH MODEL 001 ĐỂ TRÁNH LỖI 404
+# ĐỔI THÀNH MODEL 001 - Đây là model ổn định nhất cho v1beta
 EMBEDDING_MODEL = "models/gemini-embedding-001" 
 
 CONSUL_HOST = os.getenv("CONSUL_HOST", "consul-server")
@@ -50,7 +50,7 @@ class MovieQuery(BaseModel):
     description: str
 
 # ===============================
-# 3. CONSUL (SERVICE DISCOVERY)
+# 3. SERVICE DISCOVERY (CONSUL)
 # ===============================
 def register_to_consul():
     try:
@@ -82,7 +82,7 @@ def deregister_from_consul():
         c.agent.service.deregister(service_id)
         print("🔻 Deregistered from Consul")
     except Exception as e:
-        print(f"⚠️ Consul deregistration failed: {e}")
+        print(f"⚠️ Consul deregister failed: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -93,38 +93,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Movie AI Classifier", lifespan=lifespan)
 
 # ===============================
-# 4. CORE LOGIC
+# 4. CORE LOGIC (FIXED MODEL)
 # ===============================
 def get_single_embedding(text: str):
-    """Tạo embedding 768 chiều cho MongoDB Index"""
+    """Tạo embedding và ép về 768 chiều"""
     try:
         if not text or ai_client is None:
             return None
 
-        # Sử dụng config để ép dimensionality về 768
+        # Sử dụng model 001 và config output_dimensionality
         result = ai_client.models.embed_content(
             model=EMBEDDING_MODEL,
             contents=text,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_QUERY",
-                output_dimensionality=768
+                output_dimensionality=768 # Ép về 768 để khớp Index của bạn
             )
         )
         vector = result.embeddings[0].values
-        
-        # In log để kiểm tra trong kubectl logs
-        print(f"📏 Created vector: {len(vector)} dimensions for text: '{text[:30]}...'")
-        
+        print(f"📏 Created vector: {len(vector)} dims for query")
         return vector
     except Exception as e:
-        print(f"🔥 Gemini API Error: {e}")
+        print(f"🔥 Gemini API Error (Model: {EMBEDDING_MODEL}): {e}")
         return None
 
 def background_sync_embeddings():
-    print("🔄 Starting background sync...")
     query = {"fullplot": {"$exists": True}, VECTOR_FIELD_PATH: {"$exists": False}}
     cursor = movies_col.find(query).limit(50)
-    
     updated = 0
     for doc in cursor:
         vector = get_single_embedding(doc["fullplot"])
@@ -134,16 +129,16 @@ def background_sync_embeddings():
                 {"$set": {VECTOR_FIELD_PATH: vector}},
             )
             updated += 1
-    print(f"✅ Background Sync Complete: Updated {updated} movies.")
+    print(f"✅ Updated {updated} movies in background")
 
 # ===============================
 # 5. API ENDPOINTS
 # ===============================
 @app.post("/classify")
 async def classify_movie(query: MovieQuery):
-    print(f"📩 Received request: {query.description}")
-    
+    print(f"🔎 Classifying: {query.description}")
     user_vector = get_single_embedding(query.description)
+    
     if not user_vector:
         raise HTTPException(status_code=500, detail="Gemini embedding failed")
 
@@ -169,7 +164,7 @@ async def classify_movie(query: MovieQuery):
     try:
         neighbors = list(movies_col.aggregate(pipeline))
         if not neighbors:
-            return {"predicted_genre": "Unknown", "message": "No matches found"}
+            return {"predicted_genre": "Unknown", "message": "No matches"}
 
         all_genres = []
         for n in neighbors:
@@ -183,13 +178,13 @@ async def classify_movie(query: MovieQuery):
             "matches": neighbors,
         }
     except Exception as e:
-        print(f"❌ DB Error: {e}")
+        print(f"❌ MongoDB Search Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/sync-embeddings")
 async def trigger_sync(background_tasks: BackgroundTasks):
     background_tasks.add_task(background_sync_embeddings)
-    return {"message": "Sync started in background."}
+    return {"message": "Sync started"}
 
 @app.get("/health")
 def health():
