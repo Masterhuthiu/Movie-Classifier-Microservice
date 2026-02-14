@@ -1,194 +1,127 @@
 import os
-import socket
 import certifi
-import consul
-import uvicorn
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from typing import List
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient
+from urllib.parse import quote_plus
 from google import genai
-from google.genai import types
 
 # ===============================
-# 1. CONFIGURATION
+# CONFIG
 # ===============================
-MONGO_URI = os.getenv(
-    "MONGO_URI",
-    "mongodb+srv://masterhuthiu:123456a%40A@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority",
-)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-PORT = int(os.getenv("PORT", 8083))
+username = quote_plus("masterhuthiu")
+password = quote_plus("123456a@A")
+
+MONGO_URI = f"mongodb+srv://{username}:{password}@cluster0.3jl7a.mongodb.net/?retryWrites=true&w=majority"
 
 DB_NAME = "sample_mflix"
-COLLECTION_NAME = "movies"
-VECTOR_INDEX_NAME = "movies_vector_index"
-VECTOR_FIELD_PATH = "fullplot_gemini_embedding"
+COLLECTION = "movies"
 
-# ĐỔI THÀNH MODEL 001 - Đây là model ổn định nhất cho v1beta
-EMBEDDING_MODEL = "models/gemini-embedding-001" 
+VECTOR_INDEX = "movies_vector_index"
+VECTOR_FIELD = "fullplot_gemini_embedding"
 
-CONSUL_HOST = os.getenv("CONSUL_HOST", "consul-server")
-SERVICE_NAME = "movie-classifier"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "PUT_KEY_HERE")
+
+# ⚠️ GIỮ 768 để khớp Atlas
+EMBED_MODEL = "models/gemini-embedding-001"
+VECTOR_DIM = 768
 
 # ===============================
-# 2. INIT SERVICES
+# INIT SERVICES
 # ===============================
+
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
-movies_col = db[COLLECTION_NAME]
+col = db[COLLECTION]
 
-if GEMINI_API_KEY:
-    ai_client = genai.Client(api_key=GEMINI_API_KEY)
-    print(f"✅ Gemini Client ready (Using {EMBEDDING_MODEL})")
-else:
-    ai_client = None
-    print("⚠️ WARNING: GEMINI_API_KEY is missing!")
+ai = genai.Client(api_key=GEMINI_API_KEY)
 
-class MovieQuery(BaseModel):
-    description: str
+app = FastAPI(title="Movie Semantic Search Service")
+
+print("✅ Microservice ready (MongoDB + Gemini)")
 
 # ===============================
-# 3. SERVICE DISCOVERY (CONSUL)
+# REQUEST MODEL
 # ===============================
-def register_to_consul():
-    try:
-        c = consul.Consul(host=CONSUL_HOST, port=8500)
-        hostname = socket.gethostname()
-        service_id = f"{SERVICE_NAME}-{hostname}"
 
-        c.agent.service.register(
-            name=SERVICE_NAME,
-            service_id=service_id,
-            address=hostname,
-            port=PORT,
-            check=consul.Check.http(
-                url=f"http://{hostname}:{PORT}/health",
-                interval="10s",
-                timeout="5s",
-                deregister="1m",
-            ),
-        )
-        print(f"✅ Registered to Consul: {service_id}")
-    except Exception as e:
-        print(f"⚠️ Consul registration skipped: {e}")
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 5
 
-def deregister_from_consul():
-    try:
-        c = consul.Consul(host=CONSUL_HOST, port=8500)
-        hostname = socket.gethostname()
-        service_id = f"{SERVICE_NAME}-{hostname}"
-        c.agent.service.deregister(service_id)
-        print("🔻 Deregistered from Consul")
-    except Exception as e:
-        print(f"⚠️ Consul deregister failed: {e}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    register_to_consul()
-    yield
-    deregister_from_consul()
-
-app = FastAPI(title="Movie AI Classifier", lifespan=lifespan)
 
 # ===============================
-# 4. CORE LOGIC (FIXED MODEL)
+# CREATE EMBEDDING (CUT → 768)
 # ===============================
-def get_single_embedding(text: str):
-    """Tạo embedding và ép về 768 chiều"""
-    try:
-        if not text or ai_client is None:
-            return None
 
-        # Sử dụng model 001 và config output_dimensionality
-        result = ai_client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=text,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_QUERY",
-                output_dimensionality=768 # Ép về 768 để khớp Index của bạn
-            )
-        )
-        vector = result.embeddings[0].values
-        print(f"📏 Created vector: {len(vector)} dims for query")
-        return vector
-    except Exception as e:
-        print(f"🔥 Gemini API Error (Model: {EMBEDDING_MODEL}): {e}")
+def get_embedding(text: str) -> List[float] | None:
+    if not text:
         return None
 
-def background_sync_embeddings():
-    query = {"fullplot": {"$exists": True}, VECTOR_FIELD_PATH: {"$exists": False}}
-    cursor = movies_col.find(query).limit(50)
-    updated = 0
-    for doc in cursor:
-        vector = get_single_embedding(doc["fullplot"])
-        if vector:
-            movies_col.update_one(
-                {"_id": doc["_id"]},
-                {"$set": {VECTOR_FIELD_PATH: vector}},
-            )
-            updated += 1
-    print(f"✅ Updated {updated} movies in background")
+    try:
+        res = ai.models.embed_content(
+            model=EMBED_MODEL,
+            contents=text,
+        )
+
+        vec = res.embeddings[0].values
+
+        # ⚠️ cắt về 768 để KHỚP index Atlas
+        return vec[:VECTOR_DIM]
+
+    except Exception as e:
+        print("❌ Gemini error:", e)
+        return None
+
 
 # ===============================
-# 5. API ENDPOINTS
+# VECTOR SEARCH LOGIC
 # ===============================
-@app.post("/classify")
-async def classify_movie(query: MovieQuery):
-    print(f"🔎 Classifying: {query.description}")
-    user_vector = get_single_embedding(query.description)
-    
-    if not user_vector:
-        raise HTTPException(status_code=500, detail="Gemini embedding failed")
+
+def semantic_search(query_text: str, limit: int):
+    query_vec = get_embedding(query_text)
+
+    if not query_vec:
+        raise HTTPException(status_code=500, detail="Embedding failed")
 
     pipeline = [
         {
             "$vectorSearch": {
-                "index": VECTOR_INDEX_NAME,
-                "path": VECTOR_FIELD_PATH,
-                "queryVector": user_vector,
+                "index": VECTOR_INDEX,
+                "path": VECTOR_FIELD,
+                "queryVector": query_vec,
                 "numCandidates": 100,
-                "limit": 5,
+                "limit": limit,
             }
         },
         {
             "$project": {
+                "_id": 0,
                 "title": 1,
-                "genres": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         },
     ]
 
-    try:
-        neighbors = list(movies_col.aggregate(pipeline))
-        if not neighbors:
-            return {"predicted_genre": "Unknown", "message": "No matches"}
+    return list(col.aggregate(pipeline))
 
-        all_genres = []
-        for n in neighbors:
-            all_genres.extend(n.get("genres", []))
-        
-        predicted = max(set(all_genres), key=all_genres.count) if all_genres else "Unknown"
 
-        return {
-            "predicted_genre": predicted,
-            "confidence": neighbors[0].get("score", 0),
-            "matches": neighbors,
-        }
-    except Exception as e:
-        print(f"❌ MongoDB Search Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# ===============================
+# API ENDPOINT
+# ===============================
 
-@app.post("/admin/sync-embeddings")
-async def trigger_sync(background_tasks: BackgroundTasks):
-    background_tasks.add_task(background_sync_embeddings)
-    return {"message": "Sync started"}
+@app.post("/search")
+def search_movies(req: SearchRequest):
+    results = semantic_search(req.query, req.limit)
+
+    if not results:
+        return []
+
+    return results
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "dimensions": 768}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    return {"status": "ok"}
