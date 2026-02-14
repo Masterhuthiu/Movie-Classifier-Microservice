@@ -25,9 +25,9 @@ VECTOR_FIELD = "fullplot_gemini_embedding"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "PUT_KEY_HERE")
 
-# ⚠️ GIỮ 768 để khớp Atlas
+# ✅ Model đúng → 3072 chiều
 EMBED_MODEL = "models/gemini-embedding-001"
-VECTOR_DIM = 768
+VECTOR_DIM = 3072
 
 # ===============================
 # INIT SERVICES
@@ -41,7 +41,7 @@ ai = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI(title="Movie Semantic Search Service")
 
-print("✅ Microservice ready (MongoDB + Gemini)")
+print("✅ Microservice ready (MongoDB + Gemini 3072d)")
 
 # ===============================
 # REQUEST MODEL
@@ -53,7 +53,7 @@ class SearchRequest(BaseModel):
 
 
 # ===============================
-# CREATE EMBEDDING (CUT → 768)
+# CREATE EMBEDDING (3072 dims)
 # ===============================
 
 def get_embedding(text: str) -> List[float] | None:
@@ -68,8 +68,12 @@ def get_embedding(text: str) -> List[float] | None:
 
         vec = res.embeddings[0].values
 
-        # ⚠️ cắt về 768 để KHỚP index Atlas
-        return vec[:VECTOR_DIM]
+        # đảm bảo đúng 3072 chiều
+        if len(vec) != VECTOR_DIM:
+            print(f"❌ Wrong dimension: {len(vec)}")
+            return None
+
+        return vec
 
     except Exception as e:
         print("❌ Gemini error:", e)
@@ -115,11 +119,7 @@ def semantic_search(query_text: str, limit: int):
 @app.post("/search")
 def search_movies(req: SearchRequest):
     results = semantic_search(req.query, req.limit)
-
-    if not results:
-        return []
-
-    return results
+    return results or []
 
 
 @app.get("/health")
